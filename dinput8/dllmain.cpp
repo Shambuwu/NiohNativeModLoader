@@ -116,11 +116,26 @@ void LoadMods() {
             return;
         }
 
-        for (auto& p : std::filesystem::directory_iterator(modsDir)) {
-            if (p.path().extension() == L".dll") {
-                Log(L"[Loader] Loading mod: " + p.path().wstring());
-                LoadLibraryW(p.path().c_str());
+        for (auto& modDir : std::filesystem::directory_iterator(modsDir)) {
+            if (!modDir.is_directory())
+                continue;
+
+            std::filesystem::path dllPath;
+
+            for (auto& f : std::filesystem::directory_iterator(modDir.path())) {
+                if (f.path().extension() == L".dll") {
+                    dllPath = f.path();
+                    break;
+                }
             }
+
+            if (dllPath.empty()) {
+                Log(L"[Loader] No DLL found in: " + modDir.path().wstring());
+                continue;
+            }
+
+            Log(L"[Loader] Loading mod: " + dllPath.wstring());
+            LoadLibraryW(dllPath.c_str());
         }
 
         Log(L"[Loader] Finished loading mods");
@@ -129,6 +144,7 @@ void LoadMods() {
         Log(L"[Loader] Exception during LoadMods");
     }
 }
+
 
 DWORD WINAPI InitThread(LPVOID) {
     OpenLog();
