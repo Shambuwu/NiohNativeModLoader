@@ -1,8 +1,66 @@
 #include <windows.h>
 #include <filesystem>
-#include <cstdio>
+#include <fstream>
+#include <string>
 
 static HMODULE realDinput8 = nullptr;
+static std::wofstream gLog;
+
+// -------- helpers --------
+
+std::filesystem::path GetBaseDir() {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    return std::filesystem::path(exePath).parent_path();
+}
+
+std::wstring Now() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    wchar_t buf[64];
+    swprintf_s(buf, L"[%04d-%02d-%02d %02d:%02d:%02d.%03d] ",
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    return buf;
+}
+
+// process-wide single init guard
+bool AcquireProcessGuard() {
+    HANDLE h = CreateMutexW(nullptr, TRUE, L"Global\\NiohModLoader_Init");
+    if (!h) return true;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(h);
+        return false;
+    }
+    return true;
+}
+
+// -------- logging --------
+
+void OpenLog() {
+    try {
+        auto modsDir = GetBaseDir() / L"mods";
+        if (!std::filesystem::exists(modsDir)) {
+            std::filesystem::create_directory(modsDir);
+        }
+        gLog.open(modsDir / L"loader.log", std::ios::out | std::ios::app);
+    }
+    catch (...) {}
+}
+
+void Log(const std::wstring& msg) {
+    try {
+        if (gLog.is_open()) {
+            gLog << Now() << msg << L"\n";
+            gLog.flush();
+        }
+    }
+    catch (...) {}
+}
+
+// -------- proxy forwarding --------
 
 void LoadReal() {
     wchar_t path[MAX_PATH];
@@ -12,7 +70,8 @@ void LoadReal() {
 }
 
 FARPROC GetReal(const char* name) {
-    return realDinput8 ? GetProcAddress(realDinput8, name) : nullptr;
+    if (!realDinput8) return nullptr;
+    return GetProcAddress(realDinput8, name);
 }
 
 extern "C" {
@@ -44,32 +103,49 @@ extern "C" {
 
 }
 
+// -------- mod loading --------
+
 void LoadMods() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    auto baseDir = std::filesystem::path(exePath).parent_path();
-    auto modsDir = baseDir / L"mods";
+    try {
+        auto modsDir = GetBaseDir() / L"mods";
+        Log(L"[Loader] Scanning mods directory");
 
-    if (!std::filesystem::exists(modsDir)) {
-        std::filesystem::create_directory(modsDir);
-        return;
-    }
-
-    for (auto& p : std::filesystem::directory_iterator(modsDir)) {
-        if (p.path().extension() == L".dll") {
-            LoadLibraryW(p.path().c_str());
+        if (!std::filesystem::exists(modsDir)) {
+            std::filesystem::create_directory(modsDir);
+            Log(L"[Loader] Created mods directory");
+            return;
         }
+
+        for (auto& p : std::filesystem::directory_iterator(modsDir)) {
+            if (p.path().extension() == L".dll") {
+                Log(L"[Loader] Loading mod: " + p.path().wstring());
+                LoadLibraryW(p.path().c_str());
+            }
+        }
+
+        Log(L"[Loader] Finished loading mods");
+    }
+    catch (...) {
+        Log(L"[Loader] Exception during LoadMods");
     }
 }
 
 DWORD WINAPI InitThread(LPVOID) {
-    Sleep(3000);
+    OpenLog();
+    Log(L"[Loader] Session started");
+    Sleep(5000);
+    Log(L"[Loader] InitThread started");
     LoadMods();
     return 0;
 }
 
+// -------- entry --------
+
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        if (!AcquireProcessGuard()) {
+            return TRUE;
+        }
         DisableThreadLibraryCalls(GetModuleHandle(nullptr));
         LoadReal();
         CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
